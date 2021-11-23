@@ -16,7 +16,6 @@ from operator import add
 import keys as k
 keys = k.Keys()
 
-import pyautogui
 import pydirectinput
 
 from datetime import datetime
