@@ -52,10 +52,20 @@ python ppdet/modeling/tests/test_architectures.py
 (ok)
 
 ```
-# predict
+# test predict
 ```
-python PaddleDetection\deploy\python\det_keypoint_unite_infer.py --det_model_dir=C:\dev\fasterAutoFPS\TinyPose\picodet_s_320_pedestrian --keypoint_model_dir=TinyPose\tinypose_256x192 --image_file=TinyPose\example_imgs\a.jpeg --device=CPU --output_dir=TinyPose\output_dir\ --save_res=True
+python PaddleDetection\deploy\python\det_keypoint_unite_infer.py --det_model_dir=C:\dev\fasterAutoFPS\TinyPose\picodet_s_320_pedestrian --keypoint_model_dir=TinyPose\tinypose_256x192 --image_file=TinyPose\example_imgs\a.jpeg --device=CPU --output_dir=TinyPose\output_dir\ --det_threshold=0.8 --save_res=True
 ```
+
+# run main
+```
+python main.py --det_model_dir=C:\dev\fasterAutoFPS\TinyPose\picodet_s_320_pedestrian --keypoint_model_dir=TinyPose\tinypose_256x192
+```
+press number pad `*` button to start
+
+release number pad `*` button to stop
+
+press number pad `/` to exit program
 
 
 

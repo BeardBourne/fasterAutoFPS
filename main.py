@@ -1,14 +1,4 @@
 from grabscreen import grab_screen
-from models.experimental import attempt_load
-from utils.torch_utils import select_device, load_classifier, time_synchronized
-from utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
-    scale_coords, xyxy2xywh, strip_optimizer, set_logging, increment_path
-from utils.datasets import letterbox
-from utils.plots import plot_one_box
-import torch
-import numpy as np
-import cv2
-from numpy import random
 import win32api
 import win32con
 from operator import add
@@ -20,132 +10,203 @@ import pydirectinput
 
 from datetime import datetime
 
-with torch.no_grad():
 
-    # model speed up
-    torch.backends.cudnn.benchmark = True
 
-    weights = 'crowdhuman_yolov5m.pt'
-    device = select_device('0')
-    model = attempt_load(weights, map_location=device)  # load FP32 model
-    stride = int(model.stride.max())  # model stride
 
-    windowsz=640
-    imgsz = windowsz
+import os
+import sys
+import json
+import cv2
+import math
+import numpy as np
+import paddle
+from datetime import datetime
+
+sys.path.insert(0, './PaddleDetection/deploy/python')
+sys.path.insert(0, './PaddleDetection')
+from deploy.python.det_keypoint_unite_utils import argsparser
+from deploy.python.preprocess import decode_image
+from deploy.python.infer import Detector, DetectorPicoDet, PredictConfig, print_arguments, get_test_images
+from deploy.python.keypoint_infer import KeyPoint_Detector, PredictConfig_KeyPoint
+from deploy.python.visualize import draw_pose
+from deploy.python.utils import get_current_memory_mb
+from deploy.python.keypoint_postprocess import translate_to_ori_images
+
+
+
+KEYPOINT_SUPPORT_MODELS = {
+    'HigherHRNet': 'keypoint_bottomup',
+    'HRNet': 'keypoint_topdown'
+}
+
+
+def predict_with_given_det(image, det_res, keypoint_detector,
+                           keypoint_batch_size, det_threshold,
+                           keypoint_threshold, run_benchmark):
+    rec_images, records, det_rects = keypoint_detector.get_person_from_rect(
+        image, det_res, det_threshold)
+    keypoint_vector = []
+    score_vector = []
+    rect_vector = det_rects
+    batch_loop_cnt = math.ceil(float(len(rec_images)) / keypoint_batch_size)
+
+    for i in range(batch_loop_cnt):
+        start_index = i * keypoint_batch_size
+        end_index = min((i + 1) * keypoint_batch_size, len(rec_images))
+        batch_images = rec_images[start_index:end_index]
+        batch_records = np.array(records[start_index:end_index])
+        if run_benchmark:
+            keypoint_result = keypoint_detector.predict(
+                batch_images, keypoint_threshold, warmup=10, repeats=10)
+        else:
+            keypoint_result = keypoint_detector.predict(batch_images,
+                                                        keypoint_threshold)
+        orgkeypoints, scores = translate_to_ori_images(keypoint_result,
+                                                       batch_records)
+        keypoint_vector.append(orgkeypoints)
+        score_vector.append(scores)
+
+    keypoint_res = {}
+    keypoint_res['keypoint'] = [
+        np.vstack(keypoint_vector).tolist(), np.vstack(score_vector).tolist()
+    ] if len(keypoint_vector) > 0 else [[], []]
+    keypoint_res['bbox'] = rect_vector
+    return keypoint_res
+
+
+def topdown_unite_predict(detector,
+                          topdown_keypoint_detector,
+                          keypoint_batch_size=1):
+
+    monitor_width = 2560
+    monitor_height = 1440
+
     screensz=800
-    screen_region = (int((1920-screensz)/2), int((1080-screensz)/2), int((1920+screensz)/2), int((1080+screensz)/2))
-    window_region = (int((1920-windowsz)/2), int((1080-windowsz)/2), int((1920+windowsz)/2), int((1080+windowsz)/2))
+    screen_region = (int((monitor_width-screensz)/2), int((monitor_height-screensz)/2), int((monitor_width+screensz)/2), int((monitor_height+screensz)/2))
 
-    center = [int(1920/2), int(1080/2)]
-
-    model.half()
-    names = model.module.names if hasattr(model, 'module') else model.names
-    colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
-
-    warmup = True
+    center = [int(monitor_width/2), int(monitor_height/2)]
 
 
     while True:
         if win32api.GetAsyncKeyState(win32con.VK_DIVIDE):
+            print('cv2.destroyAllWindows()')
             cv2.destroyAllWindows()
             break
 
-        if (win32api.GetAsyncKeyState(win32con.VK_MULTIPLY) or warmup):
-            warmup = False
-            # print('Loop start')
-            # print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
+        if (win32api.GetAsyncKeyState(win32con.VK_MULTIPLY)):
+            print('Loop start')
+            print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
 
             screen = grab_screen(region=screen_region)
-            window = grab_screen(region=window_region)
-            im0 = cv2.resize(window, (imgsz, imgsz))
-            img = letterbox(im0, imgsz, stride=stride)[0]
-            img = img[:, :, ::-1].transpose(2, 0, 1)
+            window = screen
 
+            image, _ = decode_image(window, {})
 
-            img = np.ascontiguousarray(img)
-            img = torch.from_numpy(img).to(device)
-            img = img.half()
-            img /= 255.0  # 0 - 255 to 0.0 - 1.0
-            if img.ndimension() == 3:
-                img = img.unsqueeze(0)
-            # print('inference start')
-            # print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
-            pred = model(img, augment=True)[0]
-            # print('inference end')
-            # print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
-            pred = non_max_suppression(pred)
+            print('detector')
+            print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
+            results = detector.predict([image], FLAGS.det_threshold)
+            print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
 
-
+            if results['boxes_num'] == 0:
+                continue
             
-            # Process detections
-            for i, det in enumerate(pred):  # detections per image
+            # only target one person box
+            results['boxes'] = np.array([results['boxes'][0]])
+            results['boxes_num'] = np.array([1])
 
-                # s = ''
-                # s += '%gx%g ' % img.shape[2:]  # print string
-                if len(det):
-                    # Rescale boxes from img_size to im0 size
-                    det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
-
-                    # Write results
-                    head_center = None
-                    upper_body_center = None
-                    target_center = None
-
-                    for *xyxy, conf, cls in reversed(det):
-                        if float(conf) > 0.6:
-                            label = f'{names[int(cls)]} {conf:.2f}'
-                            plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=3)
-                            c1, c2 = (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3]))
-                            if 'head' in label:
-                                if float(conf) > 0.8:
-                                    head_center = [int((c1[0]+ c2[0])/2),int((c1[1]+ c2[1])/2)]
-                            else:
-                                upper_body_center = [int((c1[0]+ c2[0])/2),int((c1[1]*3+ c2[1])/4)]
-
-                    
-                    # reversed so the last xyxy has the most high score.
-                    if head_center:
-                        target_center = head_center
-                        im0 = cv2.circle(im0, head_center, radius=8, color=(255, 0, 0), thickness=-1)
-                        head_center = None
-                    elif upper_body_center:
-                        target_center = upper_body_center
-                        im0 = cv2.circle(im0, upper_body_center, radius=10, color=(255, 200, 200), thickness=-1)
-                        upper_body_center = None
-                    if target_center:
-
-                        target_center =list(map(add, [window_region[0], window_region[1]], target_center))
-
-                        pydirectinput.moveTo(target_center[0], int(target_center[1]), relative=True)
-                        
-                        pydirectinput.click()
-                        pydirectinput.click()
-                        pydirectinput.click()
-
-                        target_center = None
-            # print('SetCursorPos')
-            # print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
+            print('topdown_keypoint_detector')
+            print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
+            keypoint_res = predict_with_given_det(
+                image, results, topdown_keypoint_detector, keypoint_batch_size,
+                FLAGS.det_threshold, FLAGS.keypoint_threshold, FLAGS.run_benchmark)
+            print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
+            # print(keypoint_res)
+            if len(keypoint_res['bbox']) == 0:
+                continue
+            sum_x = 0
+            sum_y = 0
+            for i in range(0,5):
+                sum_x += keypoint_res['keypoint'][0][0][i][0]
+                sum_y += keypoint_res['keypoint'][0][0][i][1]
 
 
+            target_center = [
+                sum_x/5,
+                sum_y/5
+            ]
+            target_center =list(map(add, [screen_region[0], screen_region[1]], target_center))
+            # print(target_center)
+            print('before pydirectinput.moveTo')
+            print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
+
+            # pydirectinput.moveTo(int(target_center[0]), int(target_center[1]))
+            pydirectinput.click(int(target_center[0]), int(target_center[1]), clicks=0)
+            # pydirectinput.leftClick(int(target_center[0]), int(target_center[1]))
+
+            # pydirectinput.moveTo(int(target_center[0]), int(target_center[1]), relative=True)
+
+            print('Loop end')
+            print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
+
+            # returnimg = draw_pose(
+            #     screen,
+            #     keypoint_res,
+            #     visual_thread=FLAGS.keypoint_threshold,
+            #     returnimg=True)
+            # print('get returnimg!!')
+            # cv2.imshow('result', returnimg)
+            # print('after cv2.imshow!!')
+            # cv2.waitKey(1)
 
 
-            # im0 = cv2.cvtColor(im0, cv2.COLOR_BGR2RGB)
-            # im0 = cv2.resize(im0, (windowsz, windowsz))
+def main():
+    pred_config = PredictConfig(FLAGS.det_model_dir)
+    detector_func = 'Detector'
+    if pred_config.arch == 'PicoDet':
+        detector_func = 'DetectorPicoDet'
 
-            # lt = int((screensz-windowsz)/2)
-            # rb = int((screensz+windowsz)/2)
+    detector = eval(detector_func)(pred_config,
+                                   FLAGS.det_model_dir,
+                                   device=FLAGS.device,
+                                   run_mode=FLAGS.run_mode,
+                                   trt_min_shape=FLAGS.trt_min_shape,
+                                   trt_max_shape=FLAGS.trt_max_shape,
+                                   trt_opt_shape=FLAGS.trt_opt_shape,
+                                   trt_calib_mode=FLAGS.trt_calib_mode,
+                                   cpu_threads=FLAGS.cpu_threads,
+                                   enable_mkldnn=FLAGS.enable_mkldnn)
 
-            # screen = cv2.cvtColor(screen, cv2.COLOR_BGR2RGB)
-            # screen[lt:rb, lt:rb] = im0
+    pred_config = PredictConfig_KeyPoint(FLAGS.keypoint_model_dir)
+    assert KEYPOINT_SUPPORT_MODELS[
+        pred_config.
+        arch] == 'keypoint_topdown', 'Detection-Keypoint unite inference only supports topdown models.'
+    topdown_keypoint_detector = KeyPoint_Detector(
+        pred_config,
+        FLAGS.keypoint_model_dir,
+        device=FLAGS.device,
+        run_mode=FLAGS.run_mode,
+        batch_size=FLAGS.keypoint_batch_size,
+        trt_min_shape=FLAGS.trt_min_shape,
+        trt_max_shape=FLAGS.trt_max_shape,
+        trt_opt_shape=FLAGS.trt_opt_shape,
+        trt_calib_mode=FLAGS.trt_calib_mode,
+        cpu_threads=FLAGS.cpu_threads,
+        enable_mkldnn=FLAGS.enable_mkldnn,
+        use_dark=FLAGS.use_dark)
 
-            # cv2.rectangle(screen, (lt, lt), (rb, rb), [200, 200, 200], 5, cv2.LINE_AA)
-            # cv2.imshow('result', screen)
+
+    # predict from image
+    topdown_unite_predict(detector, topdown_keypoint_detector,
+                            FLAGS.keypoint_batch_size)
 
 
-            cv2.waitKey(1)
+if __name__ == '__main__':
+    paddle.enable_static()
+    parser = argsparser()
+    FLAGS = parser.parse_args()
+    print_arguments(FLAGS)
+    FLAGS.device = FLAGS.device.upper()
+    assert FLAGS.device in ['CPU', 'GPU', 'XPU'
+                            ], "device should be CPU, GPU or XPU"
 
-
-
-            
-            # print('Loop end')
-            # print(datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
+    main()
